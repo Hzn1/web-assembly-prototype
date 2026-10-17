@@ -1,0 +1,21 @@
+[package]
+name = "voxel_island"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+macroquad = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[package.metadata.android]
+package = "com.voxel.island"
+apk_name = "VoxelIsland"
+
+[package.metadata.android.sdk]
+min_sdk_version = 21
+target_sdk_version = 33

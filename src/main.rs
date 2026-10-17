@@ -446,56 +446,100 @@ fn raycast(world: &World, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<(Vec
 }
 
 // --- RENDERER 3D SOFTWARE ---
+const NEAR_PLANE: f32 = 0.2;
+const MAX_RENDER_FACES: usize = 3500;
+
 struct Face {
-    v: [Vec2; 4],
+    v: [Vec2; 5],
+    count: usize,
     color: Color,
-    dist_sq: f32,
+    depth: f32,
     lod: bool,
 }
 
-fn project(v: Vec3, cam: &Player, sw: f32, sh: f32) -> Option<Vec2> {
+fn camera_space(v: Vec3, cam: &Player) -> Vec3 {
     let mut p = v - cam.eye_pos();
 
     let cy = cam.yaw.cos();
     let sy = cam.yaw.sin();
     let x = p.x * cy - p.z * sy;
-    let z = p.x * sy + p.z * cy;
+    let yaw_depth = p.x * sy + p.z * cy;
     p.x = x;
-    p.z = z;
 
     let cp = cam.pitch.cos();
     let sp = cam.pitch.sin();
-    let y = p.y * cp - p.z * sp;
-    let z2 = p.y * sp + p.z * cp;
-    p.y = y;
-    p.z = z2;
+    let y = p.y * cp + yaw_depth * sp;
+    let depth = p.y * sp - yaw_depth * cp;
 
-    if p.z < 0.2 {
-        return None;
+    Vec3::new(x, y, depth)
+}
+
+fn clip_face_to_near_plane(vertices: [Vec3; 4]) -> ([Vec3; 5], usize) {
+    let mut clipped = [Vec3::ZERO; 5];
+    let mut count = 0;
+    let mut previous = vertices[3];
+    let mut previous_inside = previous.z >= NEAR_PLANE;
+
+    for current in vertices {
+        let current_inside = current.z >= NEAR_PLANE;
+        if current_inside != previous_inside {
+            let denominator = current.z - previous.z;
+            if denominator.abs() > f32::EPSILON {
+                let t = (NEAR_PLANE - previous.z) / denominator;
+                clipped[count] = previous + (current - previous) * t;
+                count += 1;
+            }
+        }
+
+        if current_inside {
+            clipped[count] = current;
+            count += 1;
+        }
+
+        previous = current;
+        previous_inside = current_inside;
     }
 
+    (clipped, count)
+}
+
+fn project_camera_space(p: Vec3, sw: f32, sh: f32) -> Vec2 {
     let focal = sh / (2.0 * (45.0_f32.to_radians() / 2.0).tan());
     let sx = (p.x / p.z) * focal + sw / 2.0;
     let sy = -(p.y / p.z) * focal + sh / 2.0;
-    Some(Vec2::new(sx, sy))
+    Vec2::new(sx, sy)
+}
+
+fn project(v: Vec3, cam: &Player, sw: f32, sh: f32) -> Option<Vec2> {
+    let p = camera_space(v, cam);
+
+    if p.z < NEAR_PLANE {
+        return None;
+    }
+
+    Some(project_camera_space(p, sw, sh))
 }
 
 fn draw_face(face: &Face) {
     let mut v = face.v;
-    let cx = (v[0].x + v[1].x + v[2].x + v[3].x) / 4.0;
-    let cy = (v[0].y + v[1].y + v[2].y + v[3].y) / 4.0;
-    for i in 0..4 {
-        let dx = v[i].x - cx;
-        let dy = v[i].y - cy;
+    let center = v[..face.count]
+        .iter()
+        .fold(Vec2::ZERO, |sum, point| sum + *point)
+        / face.count as f32;
+
+    for i in 0..face.count {
+        let dx = v[i].x - center.x;
+        let dy = v[i].y - center.y;
         let len = (dx * dx + dy * dy).sqrt().max(0.001);
         v[i].x += (dx / len) * 0.5;
         v[i].y += (dy / len) * 0.5;
     }
 
-    draw_triangle(v[0], v[1], v[2], face.color);
-    draw_triangle(v[0], v[2], v[3], face.color);
+    for i in 1..face.count - 1 {
+        draw_triangle(v[0], v[i], v[i + 1], face.color);
+    }
 
-    if face.lod {
+    if face.lod && face.count == 4 {
         let _light = Color::new(
             face.color.r * 1.1,
             face.color.g * 1.1,
@@ -887,25 +931,29 @@ async fn main() {
                             _ => continue,
                         };
 
-                        let mut screen_verts = [Vec2::ZERO; 4];
-                        let mut valid = true;
-                        for i in 0..4 {
-                            if let Some(sv) = project(verts[i], &player, sw, sh) {
-                                screen_verts[i] = sv;
-                            } else {
-                                valid = false;
-                                break;
-                            }
-                        }
-                        if !valid {
+                        let camera_verts = verts.map(|v| camera_space(v, &player));
+                        let (clipped_verts, vertex_count) =
+                            clip_face_to_near_plane(camera_verts);
+                        if vertex_count < 3 {
                             continue;
                         }
 
-                        let cross = (screen_verts[1].x - screen_verts[0].x)
-                            * (screen_verts[2].y - screen_verts[0].y)
-                            - (screen_verts[1].y - screen_verts[0].y)
-                                * (screen_verts[2].x - screen_verts[0].x);
-                        if cross < 0.0 {
+                        let mut screen_verts = [Vec2::ZERO; 5];
+                        let mut depth = 0.0;
+                        for i in 0..vertex_count {
+                            screen_verts[i] =
+                                project_camera_space(clipped_verts[i], sw, sh);
+                            depth += clipped_verts[i].z;
+                        }
+                        depth /= vertex_count as f32;
+
+                        let mut signed_area = 0.0;
+                        for i in 0..vertex_count {
+                            let next = (i + 1) % vertex_count;
+                            signed_area += screen_verts[i].x * screen_verts[next].y
+                                - screen_verts[next].x * screen_verts[i].y;
+                        }
+                        if signed_area < 0.0 {
                             continue;
                         }
 
@@ -913,24 +961,23 @@ async fn main() {
                         let fog_t = (dist_sq / max_dist_sq).clamp(0.0, 1.0).powf(1.5);
                         color = lerp_color(color, FOG_COLOR, fog_t);
 
-                        if faces.len() < 3500 {
-                            faces.push(Face {
-                                v: screen_verts,
-                                color,
-                                dist_sq,
-                                lod,
-                            });
-                        }
+                        faces.push(Face {
+                            v: screen_verts,
+                            count: vertex_count,
+                            color,
+                            depth,
+                            lod,
+                        });
                     }
                 }
             }
         }
 
-        faces.sort_unstable_by(|a, b| {
-            b.dist_sq
-                .partial_cmp(&a.dist_sq)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        if faces.len() > MAX_RENDER_FACES {
+            faces.select_nth_unstable_by(MAX_RENDER_FACES, |a, b| a.depth.total_cmp(&b.depth));
+            faces.truncate(MAX_RENDER_FACES);
+        }
+        faces.sort_unstable_by(|a, b| b.depth.total_cmp(&a.depth));
 
         for face in &faces {
             draw_face(face);

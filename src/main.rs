@@ -26,6 +26,7 @@ const WOOD: u8 = 5;
 const LEAVES: u8 = 6;
 const WATER: u8 = 7;
 const PLANKS: u8 = 8;
+const MOUSE_LOOK_SENSITIVITY: f32 = 0.008;
 
 const SKY_COLOR: Color = Color::new(0.4, 0.7, 1.0, 1.0);
 const FOG_COLOR: Color = SKY_COLOR;
@@ -568,6 +569,7 @@ fn draw_face(face: &Face) {
 // --- LOOP PRINCIPAL ---
 #[macroquad::main(window_conf)]
 async fn main() {
+    simulate_mouse_with_touch(false);
     srand(get_time() as u64);
     let mut world = World::new();
     let mut player = Player::new(WX as f32 / 2.0, 20.0, WZ as f32 / 2.0);
@@ -578,6 +580,7 @@ async fn main() {
     let mut render_dist = 22.0;
     let mut fps_timer = 0.0;
     let mut fps_display = 0;
+    let mut mouse_captured = false;
 
     loop {
         let dt = get_frame_time().min(0.05);
@@ -589,34 +592,52 @@ async fn main() {
         let mut jump = false;
         let mut break_block = false;
         let mut place_block = false;
+        let mut just_captured_mouse = false;
 
-        if is_key_down(KeyCode::W) {
+        if is_key_down(KeyCode::W) || is_key_down(KeyCode::Up) {
             move_dir.y += 1.0;
         }
-        if is_key_down(KeyCode::S) {
+        if is_key_down(KeyCode::S) || is_key_down(KeyCode::Down) {
             move_dir.y -= 1.0;
         }
-        if is_key_down(KeyCode::A) {
+        if is_key_down(KeyCode::A) || is_key_down(KeyCode::Left) {
             move_dir.x -= 1.0;
         }
-        if is_key_down(KeyCode::D) {
+        if is_key_down(KeyCode::D) || is_key_down(KeyCode::Right) {
             move_dir.x += 1.0;
+        }
+        if move_dir.length_squared() > 1.0 {
+            move_dir = move_dir.normalize();
         }
         if is_key_down(KeyCode::Space) {
             jump = true;
         }
 
-        if is_mouse_button_pressed(MouseButton::Left) {
-            break_block = true;
-        }
-        if is_mouse_button_pressed(MouseButton::Right) {
-            place_block = true;
+        if is_key_pressed(KeyCode::Escape) && mouse_captured {
+            set_cursor_grab(false);
+            show_mouse(true);
+            mouse_captured = false;
         }
 
-        if is_mouse_button_down(MouseButton::Right) {
+        let left_click = is_mouse_button_pressed(MouseButton::Left);
+        let right_click = is_mouse_button_pressed(MouseButton::Right);
+        if !mouse_captured && (left_click || right_click) {
+            set_cursor_grab(true);
+            show_mouse(false);
+            mouse_captured = true;
+            just_captured_mouse = true;
+        } else {
+            break_block = left_click;
+            place_block = right_click;
+        }
+
+        if mouse_captured && !just_captured_mouse {
             let md = mouse_delta_position();
-            player.yaw -= md.x * 0.005;
-            player.pitch = (player.pitch - md.y * 0.005).clamp(-1.48, 1.48);
+            // Macroquad returns normalized deltas here; restore pixel units for consistent mouse look.
+            let mouse_delta_pixels = Vec2::new(md.x * sw * 0.5, md.y * sh * 0.5);
+            player.yaw += mouse_delta_pixels.x * MOUSE_LOOK_SENSITIVITY;
+            player.pitch =
+                (player.pitch + mouse_delta_pixels.y * MOUSE_LOOK_SENSITIVITY).clamp(-1.48, 1.48);
         }
 
         for i in 1..=6 {
